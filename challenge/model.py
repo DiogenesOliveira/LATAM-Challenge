@@ -1,13 +1,28 @@
 import pandas as pd
+import pickle
 import numpy as np
 from typing import Tuple, Union, List
-from sklearn.linear_model import LogisticRegression
 from xgboost import XGBClassifier
 from datetime import datetime
 
+PICKLE_MODEL_PATH = "data/model.pkl"
+FULL_DATE_FORMAT = "%Y-%m-%d %H:%M:%S"
+DAY_MONTH_FORMAT = '%d-%b'
+HOUR_FORMAT = "%H:%M"
+
 class DelayModel:
     def __init__(self):
-        self._model = None  # Model should be saved in this attribute.
+        self._model = self._load_pickle_model(PICKLE_MODEL_PATH)
+
+    def _load_pickle_model(self, path: str) -> Union[None, object]:
+        with open(path, "rb") as f:
+            model = pickle.load(f)
+            return model
+    
+    def _is_delayed(self, data: pd.DataFrame) -> pd.DataFrame:
+        data["min_diff"] = data.apply(self._get_min_diff, axis=1)
+        data["delay"] = np.where(data["min_diff"] > 15, 1, 0)
+        return data
 
     def preprocess(self, data: pd.DataFrame, target_column: str = None) -> Union[Tuple[pd.DataFrame, pd.Series], pd.DataFrame]:
         """
@@ -22,11 +37,6 @@ class DelayModel:
             or
             pd.DataFrame: features.
         """
-        # Feature Engineering
-        data['period_day'] = data['Fecha-I'].apply(self._get_period_day)
-        data['high_season'] = data['Fecha-I'].apply(self._is_high_season)
-        data['min_diff'] = data.apply(self._get_min_diff, axis=1)
-        data['delay'] = np.where(data['min_diff'] > 15, 1, 0)
 
         # Selecting features
         features = pd.concat([
@@ -57,21 +67,18 @@ class DelayModel:
         features = features[expected_features]
 
         if target_column:
+            data = self._is_delayed(data)
             target = data[target_column]
             return features, target
         else:
             return features
 
     def _get_period_day(self, date: str) -> str:
-        date_time = datetime.strptime(date, '%Y-%m-%d %H:%M:%S').time()
-        morning_min = datetime.strptime("05:00", '%H:%M').time()
-        morning_max = datetime.strptime("11:59", '%H:%M').time()
-        afternoon_min = datetime.strptime("12:00", '%H:%M').time()
-        afternoon_max = datetime.strptime("18:59", '%H:%M').time()
-        evening_min = datetime.strptime("19:00", '%H:%M').time()
-        evening_max = datetime.strptime("23:59", '%H:%M').time()
-        night_min = datetime.strptime("00:00", '%H:%M').time()
-        night_max = datetime.strptime("04:59", '%H:%M').time()
+        date_time = datetime.strptime(date, FULL_DATE_FORMAT).time()
+        morning_min = datetime.strptime("05:00", HOUR_FORMAT).time()
+        morning_max = datetime.strptime("11:59", HOUR_FORMAT).time()
+        afternoon_min = datetime.strptime("12:00", HOUR_FORMAT).time()
+        afternoon_max = datetime.strptime("18:59", HOUR_FORMAT).time()
 
         if morning_min <= date_time <= morning_max:
             return 'mañana'
@@ -82,15 +89,15 @@ class DelayModel:
 
     def _is_high_season(self, fecha: str) -> int:
         fecha_año = int(fecha.split('-')[0])
-        fecha = datetime.strptime(fecha, '%Y-%m-%d %H:%M:%S')
-        range1_min = datetime.strptime('15-Dec', '%d-%b').replace(year=fecha_año)
-        range1_max = datetime.strptime('31-Dec', '%d-%b').replace(year=fecha_año)
-        range2_min = datetime.strptime('1-Jan', '%d-%b').replace(year=fecha_año)
-        range2_max = datetime.strptime('3-Mar', '%d-%b').replace(year=fecha_año)
-        range3_min = datetime.strptime('15-Jul', '%d-%b').replace(year=fecha_año)
-        range3_max = datetime.strptime('31-Jul', '%d-%b').replace(year=fecha_año)
-        range4_min = datetime.strptime('11-Sep', '%d-%b').replace(year=fecha_año)
-        range4_max = datetime.strptime('30-Sep', '%d-%b').replace(year=fecha_año)
+        fecha = datetime.strptime(fecha, FULL_DATE_FORMAT)
+        range1_min = datetime.strptime('15-Dec', DAY_MONTH_FORMAT).replace(year=fecha_año)
+        range1_max = datetime.strptime('31-Dec', DAY_MONTH_FORMAT).replace(year=fecha_año)
+        range2_min = datetime.strptime('1-Jan', DAY_MONTH_FORMAT).replace(year=fecha_año)
+        range2_max = datetime.strptime('3-Mar', DAY_MONTH_FORMAT).replace(year=fecha_año)
+        range3_min = datetime.strptime('15-Jul', DAY_MONTH_FORMAT).replace(year=fecha_año)
+        range3_max = datetime.strptime('31-Jul', DAY_MONTH_FORMAT).replace(year=fecha_año)
+        range4_min = datetime.strptime('11-Sep', DAY_MONTH_FORMAT).replace(year=fecha_año)
+        range4_max = datetime.strptime('30-Sep', DAY_MONTH_FORMAT).replace(year=fecha_año)
 
         if ((range1_min <= fecha <= range1_max) or 
             (range2_min <= fecha <= range2_max) or 
@@ -101,8 +108,8 @@ class DelayModel:
             return 0
 
     def _get_min_diff(self, row) -> float:
-        fecha_o = datetime.strptime(row['Fecha-O'], '%Y-%m-%d %H:%M:%S')
-        fecha_i = datetime.strptime(row['Fecha-I'], '%Y-%m-%d %H:%M:%S')
+        fecha_o = datetime.strptime(row['Fecha-O'], FULL_DATE_FORMAT)
+        fecha_i = datetime.strptime(row['Fecha-I'], FULL_DATE_FORMAT)
         return (fecha_o - fecha_i).total_seconds() / 60
 
     def fit(self, features: pd.DataFrame, target: pd.Series) -> None:
@@ -114,10 +121,12 @@ class DelayModel:
         # Model training
         self._model = XGBClassifier(random_state=1, learning_rate=0.01, scale_pos_weight=scale)
         self._model.fit(features, target)
+        with open(PICKLE_MODEL_PATH, "wb") as f:
+            pickle.dump(self._model, f)
 
     def predict(self, features: pd.DataFrame) -> List[int]:
         if self._model is None:
-            raise ValueError("Model has not been trained. Call `fit` before `predict`.")
+            raise ValueError("Model has not been trained. Call fit before predict.")
         
         predictions = self._model.predict(features)
         return predictions.tolist()
